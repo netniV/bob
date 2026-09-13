@@ -15,6 +15,10 @@ void                             Reset()
   available = true;
   owner     = GetCurrentThreadId();
   forcing   = false;
+  persistence_unavailable = false;
+  reported_save_failure   = false;
+  save_status_changed     = nullptr;
+  fixture_update_callback = nullptr;
   draining = stopped = resume = false;
   vote                        = 0;
   resumes                     = 0;
@@ -34,6 +38,42 @@ int main(int argc, char** argv)
     Sleep(10000); // Parent kills this fixture if the independent deadline fails.
     return 9;
   }
+  unsigned         notices     = 0;
+  static unsigned* noticeCount = &notices;
+  assert(runtime_config::SetSaveStatusObserver([] { ++*noticeCount; }));
+  fixture.failures = true;
+  std::thread foreignNotice([] { Update(); });
+  foreignNotice.join();
+  assert(notices == 0 && runtime_config::HasSaveFailures());
+  Update();
+  Update();
+  assert(notices == 1); // One UI callback on a transition, never on each frame.
+  fixture.failures = false;
+  Update();
+  assert(notices == 2 && !runtime_config::HasSaveFailures());
+  available               = false;
+  writer                  = nullptr; // Configure/Install never supplied the normal update path.
+  fixture_update_callback = nullptr;
+  assert(runtime_config::SetSaveStatusObserver(save_status_changed));
+  assert(fixture_update_callback);
+  runtime_config::SaveWarpMode("warp");
+  fixture_update_callback();
+  assert(notices == 3 && runtime_config::HasSaveFailures());
+  available = true;
+  writer    = &fixture;
+  runtime_config::SaveWarpMode("jump");
+  Update();
+  assert(notices == 3 && runtime_config::HasSaveFailures()); // Rejected edits remain session-only.
+  Reset();
+  fixture.failures = true; // Transient thread-start failure is tracked by its key.
+  runtime_config::SaveWarpMode("warp");
+  assert(runtime_config::HasSaveFailures() && !persistence_unavailable);
+  fixture.failures = false;
+  runtime_config::SaveWarpMode("jump");
+  assert(!runtime_config::HasSaveFailures());
+  Reset();
+  runtime_config::SaveWarpMode("invalid");
+  assert(fixture.submissions == 0); // Generic submission must retain the mode wrapper's domain check.
   assert(WantsQuit([] { return true; }));
   assert(fixture.stopped && stopped && !draining);
   runtime_config::SaveWarpMode("warp");
