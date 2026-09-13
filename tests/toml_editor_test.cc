@@ -3,6 +3,7 @@
 #include <cassert>
 #include <fstream>
 #include <iostream>
+#include <limits>
 
 using namespace config_edit;
 static Request Mode(std::optional<Value> expected, std::string desired)
@@ -63,6 +64,27 @@ int main(int argc, char** argv)
   combining_expected.replace(combining_expected.find("'none'"), 6, "\"warp\"");
   assert(editor.Prepare(combining, request).text == combining_expected);
   const Request boolean{"ui", "enabled", Value{false}, true};
+  const auto    numeric =
+      editor.Prepare("[graphics]\nthreshold = 0.5 # keep\n", {"graphics", "threshold", Value{0.5}, 0.75});
+  assert(numeric.outcome == Outcome::Prepared && numeric.text == "[graphics]\nthreshold = 0.75 # keep\n");
+  assert(editor.Prepare("[graphics]\nthreshold = 0.6\n", {"graphics", "threshold", Value{0.5}, 0.75}).outcome
+         == Outcome::Conflict);
+  const auto integer =
+      editor.Prepare("[graphics]\nthreshold = 0\n", {"graphics", "threshold", Value{std::int64_t{0}}, 0.5});
+  assert(integer.outcome == Outcome::Prepared
+         && toml::parse(integer.text)["graphics"]["threshold"].value<double>() == 0.5);
+  for (const auto desired : {std::numeric_limits<std::int64_t>::min(), std::numeric_limits<std::int64_t>::max()}) {
+    const auto whole =
+        editor.Prepare("[graphics]\ncount = 0 # keep\n", {"graphics", "count", Value{std::int64_t{0}}, desired});
+    assert(whole.outcome == Outcome::Prepared && whole.text.ends_with(" # keep\n"));
+    assert(toml::parse(whole.text)["graphics"]["count"].value<std::int64_t>() == desired);
+  }
+  for (const auto desired : {std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(),
+                             std::numeric_limits<double>::quiet_NaN()}) {
+    const auto invalid =
+        editor.Prepare("[graphics]\nthreshold = 0.5 # keep\n", {"graphics", "threshold", Value{0.5}, desired});
+    assert(invalid.outcome == Outcome::Unsupported && invalid.text.empty());
+  }
   assert(editor.Prepare("[ui]\nenabled = false # keep\n", boolean).text == "[ui]\nenabled = true # keep\n");
   assert(editor.Prepare("[ui]\nenabled = true", boolean).outcome == Outcome::AlreadySaved);
   assert(editor.Prepare("[ui]\nenabled = 'false'", boolean).outcome == Outcome::Conflict);

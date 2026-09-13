@@ -2,20 +2,23 @@
 #include <chrono>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 using namespace config_edit;
 using namespace std::chrono_literals;
 namespace
 {
-std::mutex              gate;
-std::condition_variable changed;
-bool                    entered = false, released = false;
-Outcome                 first_result = Outcome::Saved;
-std::vector<Request>    requests;
-std::thread::id         save_thread;
-int                     reports      = 0;
-bool                    block_report = false, release_report = false;
+std::mutex                            gate;
+std::condition_variable               changed;
+bool                                  entered = false, released = false;
+Outcome                               first_result = Outcome::Saved;
+std::vector<Request>                  requests;
+std::thread::id                       save_thread;
+std::chrono::steady_clock::time_point save_entered_at;
+int                                   reports      = 0;
+bool                                  block_report = false, release_report = false;
+bool                                  fail_thread_start = false;
 
 void Check(bool value)
 {
@@ -25,7 +28,8 @@ void Check(bool value)
 Outcome Save(TomlEditor&, const std::filesystem::path&, const Request& request)
 {
   std::unique_lock lock(gate);
-  save_thread = std::this_thread::get_id();
+  save_thread     = std::this_thread::get_id();
+  save_entered_at = std::chrono::steady_clock::now();
   requests.push_back(request);
   if (requests.size() == 1) {
     entered = true;
@@ -36,7 +40,7 @@ Outcome Save(TomlEditor&, const std::filesystem::path&, const Request& request)
   }
   return Outcome::Saved;
 }
-void Report(Outcome)
+void Report(std::string_view, std::string_view, Outcome)
 {
   std::unique_lock lock(gate);
   ++reports;
@@ -63,10 +67,25 @@ void Release()
   released = true;
   changed.notify_all();
 }
+void AwaitCompletion(RuntimeConfigWriter& writer, std::uint64_t revision)
+{
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  while (writer.LastCompletion().revision != revision || writer.HasWork()) {
+    Check(std::chrono::steady_clock::now() < deadline);
+    std::this_thread::yield();
+  }
+}
+template <typename Function, typename Owner> std::thread StartWorker(Function function, Owner* owner)
+{
+  if (std::exchange(fail_thread_start, false))
+    throw std::runtime_error("fixture thread-start failure");
+  return std::thread(function, owner);
+}
 } // namespace
 
 // Block at the real worker's save boundary to exercise scheduling deterministically.
 #define CONFIG_EDIT_SAVE(editor, path, request) Save(editor, path, request)
+#define CONFIG_EDIT_START_WORKER(...) StartWorker(__VA_ARGS__)
 #include "../mods/src/runtime_config_writer.cc"
 
 int main()
@@ -124,6 +143,34 @@ int main()
     }
     Begin(Outcome::IoError);
     {
+      RuntimeConfigWriter writer("unused", Value{std::string("none")}, Report);
+      Check(writer.Register("graphics", "threshold", Value{0.5}));
+      const auto failed = writer.Submit("warp");
+      AwaitSave();
+      Release();
+      AwaitCompletion(writer, failed);
+      Check(writer.HasFailures());
+      AwaitCompletion(writer, writer.Submit("graphics", "threshold", 0.7));
+      Check(writer.HasFailures()); // Saving B cannot hide A's failed save.
+      AwaitCompletion(writer, writer.Submit("jump"));
+      Check(!writer.HasFailures()); // A later successful save of A clears it.
+      Check(reports == 1);
+    }
+    Begin(Outcome::Saved);
+    {
+      RuntimeConfigWriter writer("unused", Value{std::string("none")});
+      fail_thread_start = true;
+      Check(!writer.Submit("warp"));
+      Check(writer.HasFailure("ui", "auto_confirm_instant_warp") && writer.HasFailures() && !writer.HasWork());
+      Check(!writer.HasFailure("other", "unregistered"));
+      const auto retry = writer.Submit("jump");
+      AwaitSave();
+      Release();
+      AwaitCompletion(writer, retry);
+      Check(!writer.HasFailures() && !writer.HasFailure("ui", "auto_confirm_instant_warp"));
+    }
+    Begin(Outcome::IoError);
+    {
       block_report = true;
       RuntimeConfigWriter writer("unused", Value{std::string("none")}, Report);
       writer.Submit("warp");
@@ -138,6 +185,65 @@ int main()
         release_report = true;
         changed.notify_all();
       }
+    }
+    Begin(Outcome::Saved);
+    {
+      RuntimeConfigWriter writer("unused", Value{std::string("none")});
+      Check(writer.Register("graphics", "threshold", Value{0.5}));
+      Check(!writer.Submit("other", "unregistered", true));
+      writer.Submit("warp");
+      AwaitSave();
+      Check(!writer.Register("graphics", "late", Value{true}));
+      writer.Submit("graphics", "threshold", 0.6, 150ms);
+      writer.Submit("jump");
+      writer.Submit("graphics", "threshold", 0.7, 150ms);
+      writer.Stop(false); // Drain also flushes a slider whose delay has not expired.
+      Release();
+      const auto deadline = std::chrono::steady_clock::now() + 5s;
+      while (!writer.PollStopped()) {
+        Check(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::yield();
+      }
+      Check(requests.size() == 3);
+      Check(requests[1].key == "auto_confirm_instant_warp" && requests[1].desired == Value{std::string("jump")});
+      Check(requests[1].expected == std::optional<Value>{std::string("warp")});
+      Check(requests[2].key == "threshold" && requests[2].desired == Value{0.7});
+      Check(requests[2].expected == std::optional<Value>{0.5});
+    }
+    Begin(Outcome::Saved);
+    {
+      RuntimeConfigWriter writer("unused", std::nullopt);
+      Check(writer.Register("graphics", "threshold", Value{0.5}));
+      writer.Submit("graphics", "threshold", 0.6, 300ms);
+      {
+        std::unique_lock lock(gate);
+        Check(!changed.wait_for(lock, 75ms, [] { return entered; }));
+      }
+      const auto submitted = std::chrono::steady_clock::now();
+      writer.Submit("graphics", "threshold", 0.7, 300ms);
+      {
+        std::unique_lock lock(gate);
+        // Wait past the old deadline but before the replacement's deadline.
+        Check(!changed.wait_until(lock, submitted + 250ms, [] { return entered; }));
+      }
+      AwaitSave(); // Ordinary expiration must start work without Stop/quit.
+      Check(save_entered_at >= submitted + 300ms);
+      writer.Stop(false);
+      Release();
+    }
+    Check(requests.size() == 1 && requests[0].desired == Value{0.7});
+    Begin(Outcome::Saved);
+    {
+      RuntimeConfigWriter writer("unused", std::nullopt);
+      Check(writer.Register("graphics", "threshold", Value{0.5}));
+      writer.Submit("graphics", "threshold", 0.9, 10s);
+      writer.Stop(true); // Cancellation must wake a delayed writer promptly.
+      const auto deadline = std::chrono::steady_clock::now() + 5s;
+      while (!writer.PollStopped()) {
+        Check(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::yield();
+      }
+      Check(requests.empty());
     }
     RuntimeConfigWriter idle("unused", std::nullopt);
     idle.Stop(false);
