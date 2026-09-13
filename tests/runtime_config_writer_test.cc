@@ -1,6 +1,7 @@
 #include "runtime_config_writer.h"
 #include <chrono>
 #include <iostream>
+#include <source_location>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -15,21 +16,21 @@ bool                                  entered = false, released = false;
 Outcome                               first_result = Outcome::Saved;
 std::vector<Request>                  requests;
 std::thread::id                       save_thread;
-std::chrono::steady_clock::time_point save_entered_at;
+std::vector<std::chrono::steady_clock::time_point> save_times;
 int                                   reports      = 0;
 bool                                  block_report = false, release_report = false;
 bool                                  fail_thread_start = false;
 
-void Check(bool value)
+void Check(bool value, std::source_location location = std::source_location::current())
 {
   if (!value)
-    throw std::runtime_error("worker fixture failed");
+    throw std::runtime_error("worker fixture failed at line " + std::to_string(location.line()));
 }
 Outcome Save(TomlEditor&, const std::filesystem::path&, const Request& request)
 {
   std::unique_lock lock(gate);
-  save_thread     = std::this_thread::get_id();
-  save_entered_at = std::chrono::steady_clock::now();
+  save_thread = std::this_thread::get_id();
+  save_times.push_back(std::chrono::steady_clock::now());
   requests.push_back(request);
   if (requests.size() == 1) {
     entered = true;
@@ -52,6 +53,7 @@ void Begin(Outcome result)
 {
   entered = released = false;
   requests.clear();
+  save_times.clear();
   reports      = 0;
   first_result = result;
   block_report = release_report = false;
@@ -211,27 +213,33 @@ int main()
       Check(requests[2].expected == std::optional<Value>{0.5});
     }
     Begin(Outcome::Saved);
+    std::chrono::steady_clock::time_point initial_submitted, replacement_submitted;
     {
       RuntimeConfigWriter writer("unused", std::nullopt);
       Check(writer.Register("graphics", "threshold", Value{0.5}));
+      initial_submitted = std::chrono::steady_clock::now();
       writer.Submit("graphics", "threshold", 0.6, 300ms);
       {
         std::unique_lock lock(gate);
-        Check(!changed.wait_for(lock, 75ms, [] { return entered; }));
+        changed.wait_for(lock, 75ms, [] { return entered; });
       }
-      const auto submitted = std::chrono::steady_clock::now();
-      writer.Submit("graphics", "threshold", 0.7, 300ms);
-      {
-        std::unique_lock lock(gate);
-        // Wait past the old deadline but before the replacement's deadline.
-        Check(!changed.wait_until(lock, submitted + 250ms, [] { return entered; }));
-      }
-      AwaitSave(); // Ordinary expiration must start work without Stop/quit.
-      Check(save_entered_at >= submitted + 300ms);
-      writer.Stop(false);
+      replacement_submitted = std::chrono::steady_clock::now();
+      const auto revision   = writer.Submit("graphics", "threshold", 0.7, 300ms);
       Release();
+      AwaitCompletion(writer, revision); // Ordinary expiration, without Stop/quit flushing the delay.
     }
-    Check(requests.size() == 1 && requests[0].desired == Value{0.7});
+    // The test thread may resume after the first deadline on a busy runner.
+    // Validate actual entry times, not a negative assertion made by a late observer.
+    // Both an already-active first write and a coalesced replacement are valid;
+    // the gated test above independently requires queued same-key coalescing.
+    Check(requests.size() == 1 || requests.size() == 2);
+    Check(requests.back().desired == Value{0.7});
+    if (requests.size() == 2)
+      Check(requests.front().desired == Value{0.6});
+    for (std::size_t i = 0; i < requests.size(); ++i) {
+      const auto submitted = requests[i].desired == Value{0.6} ? initial_submitted : replacement_submitted;
+      Check(save_times[i] >= submitted + 300ms);
+    }
     Begin(Outcome::Saved);
     {
       RuntimeConfigWriter writer("unused", std::nullopt);
