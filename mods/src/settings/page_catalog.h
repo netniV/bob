@@ -1,9 +1,11 @@
 #pragma once
 
+#include "action_setting.h"
 #include "boolean_settings.h"
 #include "choice_setting.h"
 #include "slider_setting.h"
 #include <algorithm>
+#include <functional>
 #include <ranges>
 #include <string_view>
 #include <variant>
@@ -15,14 +17,47 @@ namespace mod_settings
 class PageCatalog
 {
 public:
+  // Shared with the native adapter's child-list sanity check. Presentation
+  // producers must fit this budget without limiting the underlying config.
+  static constexpr int NativeChildLimit = 128;
   struct Heading {
     std::string id, label;
     bool        collapsible = false;
+    // Optional presentation dependency, including the heading and all following
+    // controls up to the next heading. It never changes their saved values.
+    std::function<bool()> visible;
+    std::function<std::string()> summary;
   };
-  using Item = std::variant<Heading, BooleanSetting*, ChoiceSetting*, SliderSetting*>;
+  using Item = std::variant<Heading, BooleanSetting*, ChoiceSetting*, SliderSetting*, ActionSetting*>;
   struct Page {
     std::string       id, label, parent;
     std::vector<Item> items; // Registration order is visual order, including headings.
+    std::function<std::string()> summary;
+    bool              HasConditionalSections() const
+    {
+      return std::any_of(items.begin(), items.end(), [](const Item& item) {
+        const auto* heading = std::get_if<Heading>(&item);
+        return heading && static_cast<bool>(heading->visible);
+      });
+    }
+    bool IsVisible(std::string_view id) const
+    {
+      const Heading* section = nullptr;
+      for (const auto& item : items) {
+        if (const auto* heading = std::get_if<Heading>(&item))
+          section = heading;
+        if (Id(item) == id)
+          return !section || !section->visible || section->visible();
+      }
+      return true;
+    }
+    std::size_t       PositionFor(std::string_view id) const
+    {
+      for (std::size_t i = 0; i < items.size(); ++i)
+        if (Id(items[i]) == id)
+          return i;
+      return items.size();
+    }
     // A heading owns following controls up to the next heading. Collapse is
     // presentation state only; this lookup never reads or writes a setting.
     const Heading* SectionFor(std::string_view setting_id) const
@@ -86,11 +121,25 @@ public:
   }
   Registration AddBoolean(std::string_view page, BooleanSetting& setting)
   { return AddControl(page, setting); }
+  Registration SetSummary(std::string_view id, std::function<std::string()> callback)
+  {
+    CheckThread();
+    if (frozen_)
+      return Registration::Frozen;
+    auto* page = FindPage(id);
+    if (!page)
+      return Registration::Invalid;
+    page->summary = std::move(callback);
+    return Registration::Added;
+  }
   Registration AddChoice(std::string_view page, ChoiceSetting& setting)
   { return AddControl(page, setting); }
   Registration AddSlider(std::string_view page, SliderSetting& setting)
   { return AddControl(page, setting); }
-  Registration AddHeading(std::string_view page_id, std::string id, std::string label, bool collapsible = false)
+  Registration AddAction(std::string_view page, ActionSetting& action)
+  { return AddControl(page, action); }
+  Registration AddHeading(std::string_view page_id, std::string id, std::string label, bool collapsible = false,
+                          std::function<bool()> visible = {}, std::function<std::string()> summary = {})
   {
     CheckThread();
     if (frozen_)
@@ -104,7 +153,8 @@ public:
       for (const auto& item : existing.items)
         if (Id(item) == id)
           return Registration::Duplicate;
-    page->items.emplace_back(Heading{std::move(id), std::move(label), collapsible});
+    page->items.emplace_back(
+        Heading{std::move(id), std::move(label), collapsible, std::move(visible), std::move(summary)});
     return Registration::Added;
   }
 
@@ -134,7 +184,7 @@ private:
           using T = std::decay_t<decltype(value)>;
           if constexpr (std::is_same_v<T, Heading>)
             return value.id;
-          else if constexpr (std::is_same_v<T, BooleanSetting*>)
+          else if constexpr (std::is_same_v<T, BooleanSetting*> || std::is_same_v<T, ActionSetting*>)
             return value->id();
           else
             return value->state().id();
@@ -150,12 +200,18 @@ private:
     if (!page)
       return Registration::Invalid;
     const auto& state = [&]() -> const auto& {
-      if constexpr (std::is_same_v<T, BooleanSetting>)
+      if constexpr (std::is_same_v<T, BooleanSetting> || std::is_same_v<T, ActionSetting>)
         return setting;
       else
         return setting.state();
     }();
-    if (state.id().empty() || state.label().empty())
+    const auto& label = [&]() -> const std::string& {
+      if constexpr (std::is_same_v<T, ActionSetting>)
+        return state.label;
+      else
+        return state.label();
+    }();
+    if (state.id().empty() || label.empty())
       return Registration::Invalid;
     const Item candidate = &setting;
     for (const auto& existing : pages_)

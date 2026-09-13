@@ -12,10 +12,12 @@
 namespace mod_settings
 {
 enum class Availability { Known, Unavailable, Unsupported };
+enum class UnavailableReason { Retry, OutsideRange, InvalidValue };
 template <typename T> struct ValueReadResult {
   Availability           availability = Availability::Unavailable;
   std::optional<T>       value;
   std::uint64_t          generation = 0;
+  UnavailableReason      reason     = UnavailableReason::Retry;
   static ValueReadResult Known(T value, std::uint64_t generation)
   { return {Availability::Known, value, generation}; }
   bool known() const
@@ -119,7 +121,7 @@ public:
         next.availability = Availability::Unavailable;
     }
     if (next.availability != current_.state.availability || next.value != current_.state.value
-        || next.generation != current_.state.generation)
+        || next.generation != current_.state.generation || next.reason != current_.state.reason)
       ++current_.revision;
     current_.state = next;
     current_.epoch = epoch_;

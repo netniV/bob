@@ -52,6 +52,8 @@ public:
   { return bound_ && !unresolved_ && snapshot_.state.known(); }
   bool failed() const
   { return failed_; }
+  UnavailableReason unavailableReason() const
+  { return snapshot_.state.reason; }
   std::optional<T> value() const
   { return editable() ? snapshot_.state.value : std::nullopt; }
   ValueSetting<T>& setting() const

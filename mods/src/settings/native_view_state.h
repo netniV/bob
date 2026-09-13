@@ -2,6 +2,7 @@
 #include "boolean_view.h"
 #include "choice_setting.h"
 #include "slider_setting.h"
+#include <string_view>
 
 namespace mod_settings
 {
@@ -58,8 +59,26 @@ public:
   { return slider_ ? slider_->value().has_value() : value().has_value(); }
   bool enabled() const
   { return known() && (!sliderSetting_ || sliderSetting_->enabled()); }
+  std::string_view disabledReason() const
+  { return sliderSetting_ ? std::string_view(sliderSetting_->disabledReason()) : std::string_view{}; }
+  std::string_view unavailableReason() const
+  {
+    const auto reason = boolean_  ? boolean_->unavailableReason()
+                        : choice_ ? choice_->unavailableReason()
+                                  : slider_->unavailableReason();
+    switch (reason) {
+      case UnavailableReason::OutsideRange:
+        return "Out of range; edit TOML";
+      case UnavailableReason::InvalidValue:
+        return "Invalid value; edit TOML";
+      default:
+        return "Reopen to retry";
+    }
+  }
   float number() const
   { return slider_ ? slider_->value().value_or(sliderSetting_->minimum()) : 0.0f; }
+  float displayNumber() const
+  { return sliderSetting_ ? sliderSetting_->DisplayValue(number()) : 0.0f; }
   std::optional<bool> value() const
   {
     if (boolean_)

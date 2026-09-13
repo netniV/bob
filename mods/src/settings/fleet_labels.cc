@@ -1,6 +1,7 @@
 #include "fleet_labels.h"
 #include "config.h"
 #include "patches/runtime_config.h"
+#include <format>
 namespace mod_settings
 {
 namespace
@@ -57,9 +58,24 @@ ChoiceSetting& FleetLabelDetailSetting(bool player)
 SliderSetting& FleetLabelThresholdSetting(bool player)
 {
   static SliderSetting players(Threshold(true), 0, 1, 0.01f,
-                               [] { return Profile(true).detail == FleetLabelDetail::Threshold; });
+                               [] { return Profile(true).detail == FleetLabelDetail::Threshold; },
+                               SliderLabel::Percentage, 2, "Select Threshold");
   static SliderSetting others(Threshold(false), 0, 1, 0.01f,
-                              [] { return Profile(false).detail == FleetLabelDetail::Threshold; });
+                              [] { return Profile(false).detail == FleetLabelDetail::Threshold; },
+                              SliderLabel::Percentage, 2, "Select Threshold");
   return player ? players : others;
+}
+std::string FleetLabelSummary(bool player)
+{
+  auto&      setting = FleetLabelDetailSetting(player);
+  const auto state   = setting.state().Observe().state;
+  if (!state.known())
+    return "Unavailable";
+  auto text = setting.labels().at(*state.value);
+  if (*state.value == static_cast<int>(FleetLabelDetail::Threshold)) {
+    const auto threshold = FleetLabelThresholdSetting(player).state().Observe().state;
+    text += threshold.known() ? std::format(" · {:.2f}", *threshold.value) : " · Unavailable";
+  }
+  return text;
 }
 } // namespace mod_settings

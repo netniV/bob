@@ -18,6 +18,9 @@ bool Getter(Il2CppObject*, const MethodInfo*)
 }
 void Setter(Il2CppObject*, bool value, const MethodInfo*)
 { calls += value ? 10 : 20; }
+Il2CppObject* invokedTarget = nullptr;
+void          Command(Il2CppObject* target, const MethodInfo*)
+{ invokedTarget = target; }
 Il2CppString  text{};
 Il2CppString* TextGetter(Il2CppObject*, const MethodInfo*)
 { return &text; }
@@ -56,6 +59,16 @@ int main()
   mod_settings::NativeCallback<bool> invalid;
   assert(!invalid.Initialize(&schema, Getter));
   schema.parameters_count = 0;
+  schema.parameters       = nullptr;
+  schema.flags            = METHOD_ATTRIBUTE_SPECIAL_NAME | METHOD_ATTRIBUTE_RT_SPECIAL_NAME;
+  mod_settings::NativeCallback<void> command;
+  assert(command.Initialize(&schema, Command));
+  Il2CppObject token{};
+  command.method()->invoker_method(nullptr, command.method(), &token, nullptr, nullptr);
+  assert(invokedTarget == &token);
+  invokedTarget = nullptr;
+  reinterpret_cast<decltype(&Command)>(command.method()->methodPointer)(&token, command.method());
+  assert(invokedTarget == &token && donorCalls == 0);
   schema.return_type      = &boolType;
   schema.flags            = METHOD_ATTRIBUTE_VIRTUAL;
   assert(!invalid.Initialize(&schema, Getter));

@@ -1,5 +1,9 @@
 # Rebuildable mod settings pages
 
+This records the original navigation foundation and its probes. The current
+control placement, conditional rows, summaries and native adapter ownership are
+documented in [Mod Settings](MOD_SETTINGS.md).
+
 This foundation separates presentation placement from a setting's owner. The
 intended native path is Settings > Mod Settings > group > setting. Group names
 and final membership are deliberately undecided; moving a control must not rename

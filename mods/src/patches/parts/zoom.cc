@@ -1,5 +1,6 @@
 #include "config.h"
 #include "errormsg.h"
+#include "settings/camera_settings.h"
 #include "settings/fleet_labels.h"
 #include "settings/windows_hook_extent.h"
 
@@ -23,6 +24,7 @@
 
 namespace
 {
+bool keyboard_zoom_hook_installed = false;
 std::unordered_map<NavigationLOD *, NavigationFleetWidget *> fleet_label_widgets;
 bool                                                         fleet_label_hooks_installed         = false;
 uintptr_t                                                    active_system_zoom_id               = 0;
@@ -603,6 +605,9 @@ void *PlanetViewUtils_get_FlatRenderable_Hook(auto original, PlanetViewUtils *_t
   return fr;
 }
 
+bool mod_settings::KeyboardZoomControlAvailable()
+{ return keyboard_zoom_hook_installed; }
+
 void InstallZoomHooks()
 {
   auto  navigation_zoom_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.Navigation", "NavigationZoom");
@@ -618,7 +623,7 @@ void InstallZoomHooks()
 #if defined(_WIN32) && defined(_M_X64)
   // Install once so native settings can switch away from Native during play.
   // Other platforms retain their existing startup configuration behavior.
-  enable_labels |= Config::Get().installModConfirmationSettings;
+  enable_labels |= Config::Get().installNativeSettings;
 #endif
   if (enable_labels) {
     auto lod_helper = il2cpp_get_class_helper("Assembly-CSharp", "Digit.Prime.Navigation", "NavigationLOD");
@@ -752,7 +757,7 @@ void InstallZoomHooks()
     if (ptr_update == nullptr) {
       ErrorMsg::MissingMethod("NavigationZoom", "Update");
     } else {
-      SPUD_STATIC_DETOUR(ptr_update, NavigationZoom_Update_Hook);
+      keyboard_zoom_hook_installed = SPUD_STATIC_DETOUR(ptr_update, NavigationZoom_Update_Hook);
     }
 
 #if _WIN32

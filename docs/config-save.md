@@ -52,7 +52,8 @@ pending request restarts that key's interval, without delaying other ready keys.
 Normal quit drains accepted requests, including delayed ones; cancellation wakes
 the worker and discards pending requests. There is one worker for the file, with
 no per-control threads or timers. This branch registers instant warp, Fleet Label
-detail modes and thresholds, and the Forbidden Tech confirmation bypass. Slider
+detail modes and thresholds, Camera and Preview/Cargo preferences, and the
+Forbidden Tech confirmation bypass. Slider
 edits use a 150 ms quiet interval. Each feature owns its key registration,
 validation, and choice of delay; shortcut editing follows separately.
 

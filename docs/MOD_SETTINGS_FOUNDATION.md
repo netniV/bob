@@ -1,5 +1,9 @@
 # Boolean settings foundation and native FC control
 
+Historical foundation slice: see [the current settings contract](MOD_SETTINGS.md)
+and [native adapter ownership](MOD_SETTINGS_NATIVE_ADAPTER.md) for the expanded
+system. Prototype counts and proposed budgets below describe this first slice.
+
 The controller and Fleet Commander preference adapter back a Windows x64 native
 confirmation-page control. Mod-owned TOML
 persistence and the Community Mod category are separate work.
