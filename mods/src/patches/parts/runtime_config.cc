@@ -30,6 +30,9 @@ bool                              draining = false, stopped = false, resume = fa
 std::uint64_t                     vote       = 0;
 thread_local unsigned             quit_depth = 0;
 void (*request_quit)(int)                    = nullptr;
+void (*save_status_changed)()                = nullptr;
+std::atomic_bool persistence_unavailable{false};
+bool             reported_save_failure = false;
 
 void Report(std::string_view section, std::string_view key, config_edit::Outcome result)
 {
@@ -91,6 +94,16 @@ void Update()
   owner.compare_exchange_strong(unset, GetCurrentThreadId());
   if (forcing || owner != GetCurrentThreadId() || quit_depth)
     return;
+  const bool failed = persistence_unavailable.load() || (writer && writer->HasFailures());
+  if (failed != reported_save_failure) {
+    reported_save_failure = failed;
+    if (save_status_changed) {
+      try {
+        save_status_changed();
+      } catch (...) { /* Presentation cannot interrupt shutdown. */
+      }
+    }
+  }
   bool quit = false;
   {
     std::lock_guard lock(lifecycle);
@@ -136,6 +149,30 @@ DWORD WINAPI FinishForceClose(void* handle)
 
 namespace runtime_config
 {
+bool SetSaveStatusObserver(void (*observer)())
+{
+#if defined(_WIN32) && defined(_M_X64)
+  if (save_status_changed && save_status_changed != observer)
+    return false;
+  // Status must also update if persistence/quit-hook validation failed, or no
+  // writer was configured. Registration uses the existing idempotent dispatcher.
+  if (!observer || !install_screen_manager_update_hook() || !register_screen_manager_update_callback(Update))
+    return false;
+  save_status_changed = observer;
+  return true;
+#else
+  (void)observer;
+  return false;
+#endif
+}
+bool HasSaveFailures() noexcept
+{
+#if defined(_WIN32) && defined(_M_X64)
+  return persistence_unavailable.load() || (writer && writer->HasFailures());
+#else
+  return false;
+#endif
+}
 #ifndef CONFIG_RUNTIME_TEST
 void Configure(const toml::table& loaded)
 {
@@ -203,9 +240,16 @@ void SaveSetting(const char* section, const char* key, config_edit::Value value,
 #if defined(_WIN32) && defined(_M_X64)
     if (available && !forcing && owner == GetCurrentThreadId() && !quit_depth) {
       std::lock_guard lock(lifecycle);
-      if (!draining && writer->Submit(section, key, std::move(value), delay))
-        return;
+      if (!draining) {
+        if (writer->Submit(section, key, std::move(value), delay))
+          return;
+        if (writer->HasFailure(section, key)) {
+          spdlog::warn("{}.{} changed for this session; runtime save submission failed", section, key);
+          return; // The writer owns this failure and its eventual same-key recovery.
+        }
+      }
     }
+    persistence_unavailable.store(true);
 #else
     (void)value;
 #endif
@@ -215,11 +259,25 @@ void SaveSetting(const char* section, const char* key, config_edit::Value value,
       spdlog::warn("{}.{} changed for this session; runtime persistence unavailable", section, key);
     }
   } catch (...) { /* Persistence must not interrupt the shortcut's live effect. */
+#if defined(_WIN32) && defined(_M_X64)
+    persistence_unavailable.store(true);
+#endif
   }
 }
 
 void SaveWarpMode(const char* mode) noexcept
-{ SaveSetting("ui", "auto_confirm_instant_warp", std::string(mode), {}); }
+{
+  try {
+    const std::string value(mode);
+    if (value != "none" && value != "warp" && value != "jump")
+      return;
+    SaveSetting("ui", "auto_confirm_instant_warp", value, {});
+  } catch (...) { // Keep value construction inside the shortcut's failure boundary.
+#if defined(_WIN32) && defined(_M_X64)
+    persistence_unavailable.store(true);
+#endif
+  }
+}
 
 #if _WIN32
 void ForceClose() noexcept

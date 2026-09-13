@@ -40,19 +40,31 @@ Native behavior references:
 ## Runtime edits
 
 The instant-warp mode shortcut and native mod controls change live values
-immediately, then ask one worker to persist registered settings. The worker keeps
-one pending value per key; later changes replace that key's pending intent without
-dropping another setting. Slider edits wait for a 150 ms quiet period before
-saving. The worker starts only on the first request and does not read game objects
-or call Unity. Opening a settings page does not submit a write.
+immediately, then ask one worker to persist explicitly registered keys. Opening
+a settings page does not submit a write. Each key retains its own acknowledged value and at
+most one pending request; new submissions replace that key's pending value while
+an active save finishes. Registration closes when the worker starts on its first
+request. Unregistered keys are rejected. The worker does not read game objects or
+call Unity.
+
+A submission can delay its save until a quiet interval has elapsed. Replacing a
+pending request restarts that key's interval, without delaying other ready keys.
+Normal quit drains accepted requests, including delayed ones; cancellation wakes
+the worker and discards pending requests. There is one worker for the file, with
+no per-control threads or timers. This branch registers instant warp, Fleet Label
+detail modes and thresholds, and the Forbidden Tech confirmation bypass. Slider
+edits use a 150 ms quiet interval. Each feature owns its key registration,
+validation, and choice of delay; shortcut editing follows separately.
 
 The worker reads the current file for each attempt. `TomlEditor` caches a parsed
 document only while its source bytes match. It uses toml++ source regions to
 replace the selected value, preserving unrelated bytes, comments and line endings.
 Missing settings are inserted only when reparsing proves the candidate means
-exactly the intended document. Values are typed booleans, strings, integers or
-finite floating-point numbers and encoded by toml++; quotes, backslashes and
-newlines cannot become new TOML instructions.
+exactly the intended document. Values are typed booleans, strings, signed 64-bit
+integers or finite doubles and encoded by toml++; quotes, backslashes and newlines
+cannot become new TOML instructions. Newly requested NaN/infinity values are
+rejected. Existing unrelated TOML values are preserved. Feature-specific numeric
+ranges remain the caller's responsibility.
 
 Each request compares the selected value against the last acknowledged disk value,
 including whether it was absent. String quoting/escape spelling is not part of
@@ -65,6 +77,16 @@ Each key's acknowledged value advances only after success. To reconcile a
 conflict, restore its original disk value or restart to load the file. Requesting
 a value already present externally also succeeds without a write when the control
 can represent that value. Runtime edits do not rewrite the startup-only generated snapshot.
+
+Failure state is tracked per key: saving B cannot clear a failure for A. A later
+successful save of A clears A's failure. Failure to start the worker is tracked
+the same way and does not prevent a later submission from trying again. Reporter
+callbacks include the section/key, run on the worker, and cannot stop it by
+throwing. The game adapter exposes aggregate failure status and one optional
+process-lifetime observer, called on the game thread only when that status
+changes. It uses the existing update dispatcher even if persistence setup failed.
+The adapter conservatively retains failures from submissions it could not track.
+Settings UI wording and widgets belong to the consumers, not the writer.
 
 The checked replacement re-reads the source after staging and rejects changed
 bytes before commit. This is best-effort conflict detection, not an atomic
@@ -80,8 +102,7 @@ is unavailable. The editor/storage fixtures run on all supported build platforms
 they do not establish native game-hook compatibility.
 
 An idle normal quit closes admission and passes the original vote through without
-replaying quit. When work is active, normal quit stops admission, flushes pending
-slider values without waiting out the quiet period, drains accepted work, then resumes the game's quit
+replaying quit. When work is active, normal quit stops admission, drains accepted work, then resumes the game's quit
 request after observing native worker termination. Save failures do not prevent
 exit. A genuine game veto is respected and is not retried automatically. If the
 game vetoes after draining, persistence remains stopped for that session;
@@ -95,9 +116,9 @@ is no extra frame detour or per-frame logging. Hook controls have process lifeti
 hot unloading the mod is unsupported.
 
 The fixture runners also cover preserving edits, escaped values, conflicts,
-per-key coalescing, quiet-period expiry/replacement, failed-save baselines,
-draining and cancellation. They use isolated files and compile-time seams;
-no test switches or injected test delays ship in the mod.
+numeric encoding, per-key coalescing, debounce expiry/replacement, failed-save
+baselines, failure/recovery status, worker-start retry, draining and cancellation. They use isolated
+files and compile-time seams; no test switches or artificial delays ship in the mod.
 The Windows adapter fixture executes the production lifecycle functions with
 controlled worker/Unity boundaries. Separate child processes exercise real native
 force-close calls, including a stalled cancellation caller and the 500 ms wait.
